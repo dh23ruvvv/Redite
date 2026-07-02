@@ -133,8 +133,9 @@ void Cache::loadSnapshot() {
 
         // Insert directly into the store, preserving the exact expiresAt
         // time_point that PersistenceManager computed — no second truncation.
-        store_[entry.key] = std::move(entry);
-        policy_->recordInsert(store_.find(entry.key)->second.key);
+        std::string k = entry.key;
+        store_[k] = std::move(entry);
+        policy_->recordInsert(k);
     }
 }
 
