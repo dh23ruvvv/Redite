@@ -145,6 +145,7 @@ int main() {
               << "  SIMPLIFY                                — mathematically optimize all debts\n"
               << "  SETTLE <debtor> <creditor>              — clear a debt\n"
               << "  HISTORY                                 — show expense log\n"
+              << "  RESET                                   — wipe everything and start fresh\n"
               << "  EXIT                                    — save and quit\n\n";
 
     std::string line;
@@ -399,6 +400,18 @@ int main() {
             std::cout << "\n";
         }
 
+        // --- RESET -------------------------------------------------------
+        else if (cmd == "reset") {
+            std::vector<std::string> keysToDelete;
+            for (const auto& [key, _] : cache.getAll()) {
+                keysToDelete.push_back(key);
+            }
+            for (const auto& key : keysToDelete) {
+                cache.del(key);
+            }
+            std::cout << "  Everything has been erased! You are starting completely fresh.\n";
+        }
+
         // --- EXIT --------------------------------------------------------
         else if (cmd == "exit") {
             cache.saveSnapshot();
@@ -408,7 +421,7 @@ int main() {
 
         // --- Unknown command ---------------------------------------------
         else {
-            std::cout << "  Unknown command. Try ADD, EXPENSE, BALANCES, SIMPLIFY, SETTLE, HISTORY, or EXIT.\n";
+            std::cout << "  Unknown command. Try ADD, EXPENSE, BALANCES, SIMPLIFY, SETTLE, HISTORY, RESET, or EXIT.\n";
         }
     }
 
