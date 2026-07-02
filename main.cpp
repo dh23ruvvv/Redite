@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -140,6 +142,7 @@ int main() {
               << "  ADD <name>                              — register a person\n"
               << "  EXPENSE <payer> <amount> <p1> <p2> ...  — split a bill equally\n"
               << "  BALANCES                                — show who owes whom\n"
+              << "  SIMPLIFY                                — mathematically optimize all debts\n"
               << "  SETTLE <debtor> <creditor>              — clear a debt\n"
               << "  HISTORY                                 — show expense log\n"
               << "  EXIT                                    — save and quit\n\n";
@@ -280,6 +283,75 @@ int main() {
             std::cout << "\n";
         }
 
+        // --- SIMPLIFY ----------------------------------------------------
+        else if (cmd == "simplify") {
+            const auto& all = cache.getAll();
+            std::map<std::string, double> net_balances;
+
+            // 1. Calculate net balances
+            for (const auto& [key, entry] : all) {
+                if (key.rfind("debt:", 0) != 0) continue;
+                std::string rest = key.substr(5);
+                size_t colon = rest.find(':');
+                if (colon == std::string::npos) continue;
+
+                std::string debtor = rest.substr(0, colon);
+                std::string creditor = rest.substr(colon + 1);
+
+                double amt = 0.0;
+                try { amt = std::stod(entry.value); } catch (...) { continue; }
+                if (amt < 0.01) continue;
+
+                net_balances[debtor] -= amt;
+                net_balances[creditor] += amt;
+            }
+
+            // 2. Clear all existing debts from Cache
+            std::vector<std::string> keysToDelete;
+            for (const auto& [key, _] : all) {
+                if (key.rfind("debt:", 0) == 0) {
+                    keysToDelete.push_back(key);
+                }
+            }
+            for (const auto& key : keysToDelete) {
+                cache.del(key);
+            }
+
+            // 3. Separate into debtors and creditors
+            struct PersonBal { std::string name; double amt; };
+            std::vector<PersonBal> debtors;
+            std::vector<PersonBal> creditors;
+
+            for (const auto& [name, bal] : net_balances) {
+                if (bal < -0.01) debtors.push_back({name, -bal});
+                else if (bal > 0.01) creditors.push_back({name, bal});
+            }
+
+            // Sort largest to smallest for better greedy matches
+            auto cmp = [](const PersonBal& a, const PersonBal& b) { return a.amt > b.amt; };
+            std::sort(debtors.begin(), debtors.end(), cmp);
+            std::sort(creditors.begin(), creditors.end(), cmp);
+
+            // 4. Greedy match
+            size_t d = 0, c = 0;
+            int transactions = 0;
+            while (d < debtors.size() && c < creditors.size()) {
+                double settle_amt = std::min(debtors[d].amt, creditors[c].amt);
+                
+                setDebt(cache, debtors[d].name, creditors[c].name, settle_amt);
+                transactions++;
+
+                debtors[d].amt -= settle_amt;
+                creditors[c].amt -= settle_amt;
+
+                if (debtors[d].amt < 0.01) d++;
+                if (creditors[c].amt < 0.01) c++;
+            }
+
+            std::cout << "  Debts simplified into " << transactions << " optimal transaction(s).\n";
+            appendLog(cache, "Simplified debts.");
+        }
+
         // --- SETTLE <debtor> <creditor> ----------------------------------
         else if (cmd == "settle") {
             std::string debtor, creditor;
@@ -336,7 +408,7 @@ int main() {
 
         // --- Unknown command ---------------------------------------------
         else {
-            std::cout << "  Unknown command. Try ADD, EXPENSE, BALANCES, SETTLE, HISTORY, or EXIT.\n";
+            std::cout << "  Unknown command. Try ADD, EXPENSE, BALANCES, SIMPLIFY, SETTLE, HISTORY, or EXIT.\n";
         }
     }
 
