@@ -270,7 +270,7 @@ int main() {
                     std::cout << "  ---------------------\n";
                     found = true;
                 }
-                std::cout << "  " << debtor << "  →  " << creditor
+                std::cout << "  " << debtor << "  ->  " << creditor
                           << "  :  " << amt << "\n";
             }
 
