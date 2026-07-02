@@ -51,6 +51,10 @@ public:
     // Number of entries currently stored (includes not-yet-lazily-expired ones).
     size_t size() const;
 
+    // Read-only access to every entry in the store.  Used by application
+    // layers (e.g. Splitwise) that need to scan all keys by prefix.
+    const std::unordered_map<std::string, CacheEntry>& getAll() const;
+
     // Persist current state to disk.
     void saveSnapshot() const;
 

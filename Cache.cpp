@@ -102,6 +102,10 @@ size_t Cache::size() const {
     return store_.size();
 }
 
+const std::unordered_map<std::string, CacheEntry>& Cache::getAll() const {
+    return store_;
+}
+
 // ---------------------------------------------------------------------------
 // Snapshot helpers — delegate to PersistenceManager.
 // ---------------------------------------------------------------------------

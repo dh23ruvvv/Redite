@@ -1,167 +1,342 @@
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "Cache.h"
 #include "EvictionPolicy.h"
 #include "PersistenceManager.h"
 
 // ---------------------------------------------------------------------------
-// main — a simple interactive command loop that demonstrates every feature:
+// Helper: convert a name to lowercase so commands are case-insensitive
+// for user names (alice == Alice == ALICE).
+// ---------------------------------------------------------------------------
+static std::string toLower(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: check if a user is registered in the cache.
+// ---------------------------------------------------------------------------
+static bool userExists(Cache& cache, const std::string& name) {
+    return cache.get("user:" + name).has_value();
+}
+
+// ---------------------------------------------------------------------------
+// Helper: read the current debt that `debtor` owes `creditor`.
+// Returns 0.0 if no debt exists.
+// ---------------------------------------------------------------------------
+static double getDebt(Cache& cache, const std::string& debtor,
+                      const std::string& creditor) {
+    auto val = cache.get("debt:" + debtor + ":" + creditor);
+    if (!val.has_value()) {
+        return 0.0;
+    }
+    try {
+        return std::stod(val.value());
+    } catch (...) {
+        return 0.0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: set the debt that `debtor` owes `creditor`.
+// If the amount is effectively zero, delete the key to keep things clean.
+// ---------------------------------------------------------------------------
+static void setDebt(Cache& cache, const std::string& debtor,
+                    const std::string& creditor, double amount) {
+    std::string key = "debt:" + debtor + ":" + creditor;
+    if (amount < 0.01) {
+        cache.del(key);
+    } else {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << amount;
+        cache.put(key, oss.str());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: update the net debt between two people.
 //
-//   SET key value [ttl]   — store a key; optional TTL in seconds
-//   GET key               — retrieve a key (shows lazy expiration)
-//   DEL key               — delete a key
-//   EXIT                  — save a snapshot and quit
+// If debtor already owes creditor, we add to that.
+// If creditor owes debtor (reverse direction), we subtract first to net out.
+// Example: if alice owes bob 50, and now bob owes alice 100, the result is
+// bob owes alice 50 (the alice→bob debt is cleared, bob→alice debt = 50).
+// ---------------------------------------------------------------------------
+static void addDebt(Cache& cache, const std::string& debtor,
+                    const std::string& creditor, double amount) {
+    // Check the reverse direction first.
+    double reverse = getDebt(cache, creditor, debtor);
+    if (reverse > 0.0) {
+        if (amount <= reverse) {
+            // The new debt is smaller — just reduce the reverse debt.
+            setDebt(cache, creditor, debtor, reverse - amount);
+            return;
+        } else {
+            // The new debt exceeds the reverse — clear reverse, carry remainder.
+            setDebt(cache, creditor, debtor, 0.0);
+            amount -= reverse;
+        }
+    }
+
+    // Add to (or create) the forward debt.
+    double forward = getDebt(cache, debtor, creditor);
+    setDebt(cache, debtor, creditor, forward + amount);
+}
+
+// ---------------------------------------------------------------------------
+// Helper: get the next log entry number.
+// We store the count in a special key "log:count".
+// ---------------------------------------------------------------------------
+static int getLogCount(Cache& cache) {
+    auto val = cache.get("log:count");
+    if (!val.has_value()) return 0;
+    try {
+        return std::stoi(val.value());
+    } catch (...) {
+        return 0;
+    }
+}
+
+static void appendLog(Cache& cache, const std::string& message) {
+    int count = getLogCount(cache);
+    cache.put("log:" + std::to_string(count), message);
+    cache.put("log:count", std::to_string(count + 1));
+}
+
+// ---------------------------------------------------------------------------
+// main — Mini Splitwise, powered by the Redite key-value engine.
 //
-// On startup the cache loads any previously-saved snapshot, so it picks up
-// where it left off after the last EXIT.
+// Commands:
+//   ADD <name>                              — register a person
+//   EXPENSE <payer> <amount> <p1> <p2> ...  — split a bill equally
+//   BALANCES                                — show who owes whom
+//   SETTLE <debtor> <creditor>              — clear a debt
+//   HISTORY                                 — show expense log
+//   EXIT                                    — save and quit
 // ---------------------------------------------------------------------------
 int main() {
-    const size_t CAPACITY = 3;  // Small on purpose so eviction is easy to demo.
-    const std::string SNAPSHOT_FILE = "mini_redis_snapshot.csv";
+    const size_t CAPACITY = 1000;
+    const std::string SNAPSHOT_FILE = "splitwise_snapshot.csv";
 
-    // Construct the cache with an LRU eviction policy and file persistence.
     Cache cache(
         CAPACITY,
         std::make_unique<LRUPolicy>(),
         std::make_unique<PersistenceManager>(SNAPSHOT_FILE)
     );
 
-    // Try to reload state from a previous session.
     cache.loadSnapshot();
 
-    std::cout << "\n=== Redite ===\n"
-              << "Capacity: " << CAPACITY << " entries, LRU eviction\n"
+    std::cout << "\n"
+              << "=== Mini Splitwise ===\n"
+              << "Powered by the Redite key-value engine\n\n"
               << "Commands:\n"
-              << "  SET key value [ttl]   — store a key (ttl in seconds, optional)\n"
-              << "                          use quotes for multi-word values: SET k \"hello world\"\n"
-              << "  GET key               — retrieve a key\n"
-              << "  DEL key               — delete a key\n"
-              << "  EXIT                  — save snapshot and quit\n\n";
+              << "  ADD <name>                              — register a person\n"
+              << "  EXPENSE <payer> <amount> <p1> <p2> ...  — split a bill equally\n"
+              << "  BALANCES                                — show who owes whom\n"
+              << "  SETTLE <debtor> <creditor>              — clear a debt\n"
+              << "  HISTORY                                 — show expense log\n"
+              << "  EXIT                                    — save and quit\n\n";
 
     std::string line;
     while (true) {
-        std::cout << "redite> ";
+        std::cout << "splitwise> ";
         if (!std::getline(std::cin, line)) {
-            break;  // EOF (e.g. Ctrl+D / Ctrl+Z).
+            break;
         }
 
-        // Tokenize the input line.
         std::istringstream iss(line);
         std::string command;
         if (!(iss >> command)) {
-            continue;  // Blank line — just show the prompt again.
+            continue;  // Blank line.
         }
 
-        // --- SET key value [ttl] ------------------------------------------
-        // Bug 3 fix: values can be double-quoted to allow spaces, e.g.:
-        //   SET greeting "hello world" 10
-        // Unquoted values are still single-token. Trailing garbage after
-        // the value (or after the TTL) now produces a warning.
-        if (command == "SET" || command == "set") {
-            std::string key;
-            if (!(iss >> key)) {
-                std::cout << "  Usage: SET key value [ttl]\n";
+        // Uppercase the command for case-insensitive matching.
+        std::string cmd = toLower(command);
+
+        // --- ADD <name> ---------------------------------------------------
+        if (cmd == "add") {
+            std::string name;
+            if (!(iss >> name)) {
+                std::cout << "  Usage: ADD <name>\n";
+                continue;
+            }
+            name = toLower(name);
+
+            if (userExists(cache, name)) {
+                std::cout << "  \"" << name << "\" is already in the group.\n";
                 continue;
             }
 
-            // Skip whitespace, then check if value is quoted.
-            std::string value;
-            char ch;
-            iss >> std::ws;  // Eat leading whitespace.
-            if (!iss.get(ch)) {
-                std::cout << "  Usage: SET key value [ttl]\n";
+            cache.put("user:" + name, "1");
+            std::cout << "  Added " << name << ".\n";
+        }
+
+        // --- EXPENSE <payer> <amount> <p1> <p2> ... ----------------------
+        else if (cmd == "expense") {
+            std::string payer;
+            double amount;
+            if (!(iss >> payer >> amount)) {
+                std::cout << "  Usage: EXPENSE <payer> <amount> <p1> <p2> ...\n";
+                continue;
+            }
+            payer = toLower(payer);
+
+            if (!userExists(cache, payer)) {
+                std::cout << "  Error: \"" << payer << "\" is not in the group. Use ADD first.\n";
+                continue;
+            }
+            if (amount <= 0) {
+                std::cout << "  Error: amount must be positive.\n";
                 continue;
             }
 
-            if (ch == '"') {
-                // Read until the closing quote.
-                if (!std::getline(iss, value, '"')) {
-                    std::cout << "  Error: unterminated quote.\n";
-                    continue;
+            // Read all participants.
+            std::vector<std::string> participants;
+            std::string p;
+            while (iss >> p) {
+                participants.push_back(toLower(p));
+            }
+
+            if (participants.empty()) {
+                std::cout << "  Usage: EXPENSE <payer> <amount> <p1> <p2> ...\n";
+                std::cout << "  (list the people sharing the bill, including the payer)\n";
+                continue;
+            }
+
+            // Validate all participants are registered.
+            bool allValid = true;
+            for (const auto& person : participants) {
+                if (!userExists(cache, person)) {
+                    std::cout << "  Error: \"" << person << "\" is not in the group. Use ADD first.\n";
+                    allValid = false;
                 }
-            } else {
-                // Unquoted: put the char back, read one token.
-                iss.putback(ch);
-                if (!(iss >> value)) {
-                    std::cout << "  Usage: SET key value [ttl]\n";
-                    continue;
-                }
             }
+            if (!allValid) continue;
 
-            std::optional<int> ttl = std::nullopt;
-            int ttlRaw;
-            if (iss >> ttlRaw) {
-                ttl = ttlRaw;
-            } else {
-                // Clear fail state so we can check for leftover tokens.
-                // If iss >> ttlRaw failed, whatever was there wasn't an int.
-                iss.clear();
-            }
+            double perPerson = amount / participants.size();
 
-            // Warn if there's leftover text after value/TTL.
-            std::string leftover;
-            if (iss >> leftover) {
-                std::cout << "  Warning: ignored trailing input: \""
-                          << leftover;
-                std::string rest;
-                if (std::getline(iss, rest)) {
-                    std::cout << rest;
-                }
-                std::cout << "\"\n";
-            }
+            // Build a log message.
+            std::ostringstream logMsg;
+            logMsg << std::fixed << std::setprecision(2);
+            logMsg << payer << " paid " << amount << ", split " 
+                   << participants.size() << " ways (" << perPerson << " each)";
+            appendLog(cache, logMsg.str());
 
-            cache.put(key, value, ttl);
-            std::cout << "  OK";
-            if (ttl.has_value()) {
-                std::cout << " (TTL: " << ttl.value() << "s)";
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "  " << payer << " paid " << amount
+                      << ", split " << participants.size()
+                      << " ways (" << perPerson << " each).\n";
+
+            // Update debts: everyone except the payer now owes the payer.
+            for (const auto& person : participants) {
+                if (person == payer) continue;
+                addDebt(cache, person, payer, perPerson);
+                std::cout << "  " << person << " owes " << payer
+                          << " " << perPerson << "\n";
             }
-            std::cout << "  [size=" << cache.size() << "]\n";
         }
 
-        // --- GET key ------------------------------------------------------
-        else if (command == "GET" || command == "get") {
-            std::string key;
-            if (!(iss >> key)) {
-                std::cout << "  Usage: GET key\n";
+        // --- BALANCES ----------------------------------------------------
+        else if (cmd == "balances") {
+            const auto& all = cache.getAll();
+            bool found = false;
+
+            std::cout << std::fixed << std::setprecision(2);
+            for (const auto& [key, entry] : all) {
+                // Only look at keys starting with "debt:".
+                if (key.rfind("debt:", 0) != 0) continue;
+
+                // Parse "debt:debtor:creditor".
+                std::string rest = key.substr(5);  // skip "debt:"
+                size_t colon = rest.find(':');
+                if (colon == std::string::npos) continue;
+
+                std::string debtor = rest.substr(0, colon);
+                std::string creditor = rest.substr(colon + 1);
+
+                double amt = 0.0;
+                try { amt = std::stod(entry.value); } catch (...) { continue; }
+                if (amt < 0.01) continue;
+
+                if (!found) {
+                    std::cout << "\n  Outstanding balances:\n";
+                    std::cout << "  ---------------------\n";
+                    found = true;
+                }
+                std::cout << "  " << debtor << "  →  " << creditor
+                          << "  :  " << amt << "\n";
+            }
+
+            if (!found) {
+                std::cout << "  All settled up! No outstanding debts.\n";
+            }
+            std::cout << "\n";
+        }
+
+        // --- SETTLE <debtor> <creditor> ----------------------------------
+        else if (cmd == "settle") {
+            std::string debtor, creditor;
+            if (!(iss >> debtor >> creditor)) {
+                std::cout << "  Usage: SETTLE <debtor> <creditor>\n";
+                continue;
+            }
+            debtor = toLower(debtor);
+            creditor = toLower(creditor);
+
+            double amt = getDebt(cache, debtor, creditor);
+            if (amt < 0.01) {
+                std::cout << "  " << debtor << " doesn't owe " << creditor << " anything.\n";
                 continue;
             }
 
-            auto result = cache.get(key);
-            if (result.has_value()) {
-                std::cout << "  \"" << result.value() << "\"\n";
-            } else {
-                std::cout << "  (nil)\n";
-            }
+            setDebt(cache, debtor, creditor, 0.0);
+
+            std::ostringstream logMsg;
+            logMsg << std::fixed << std::setprecision(2);
+            logMsg << "Settled: " << debtor << " paid " << creditor << " " << amt;
+            appendLog(cache, logMsg.str());
+
+            std::cout << std::fixed << std::setprecision(2);
+            std::cout << "  Settled! " << debtor << " no longer owes "
+                      << creditor << " " << amt << ".\n";
         }
 
-        // --- DEL key ------------------------------------------------------
-        else if (command == "DEL" || command == "del") {
-            std::string key;
-            if (!(iss >> key)) {
-                std::cout << "  Usage: DEL key\n";
+        // --- HISTORY -----------------------------------------------------
+        else if (cmd == "history") {
+            int count = getLogCount(cache);
+            if (count == 0) {
+                std::cout << "  No expenses recorded yet.\n";
                 continue;
             }
 
-            if (cache.del(key)) {
-                std::cout << "  Deleted.  [size=" << cache.size() << "]\n";
-            } else {
-                std::cout << "  Key not found.\n";
+            std::cout << "\n  Expense history:\n";
+            std::cout << "  ----------------\n";
+            for (int i = 0; i < count; ++i) {
+                auto msg = cache.get("log:" + std::to_string(i));
+                if (msg.has_value()) {
+                    std::cout << "  " << (i + 1) << ". " << msg.value() << "\n";
+                }
             }
+            std::cout << "\n";
         }
 
-        // --- EXIT ---------------------------------------------------------
-        else if (command == "EXIT" || command == "exit") {
+        // --- EXIT --------------------------------------------------------
+        else if (cmd == "exit") {
             cache.saveSnapshot();
             std::cout << "  Bye!\n";
             break;
         }
 
-        // --- Unknown command ----------------------------------------------
+        // --- Unknown command ---------------------------------------------
         else {
-            std::cout << "  Unknown command. Try SET, GET, DEL, or EXIT.\n";
+            std::cout << "  Unknown command. Try ADD, EXPENSE, BALANCES, SETTLE, HISTORY, or EXIT.\n";
         }
     }
 
