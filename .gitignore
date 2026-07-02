@@ -1,0 +1,15 @@
+# Build files
+*.exe
+*.o
+*.obj
+*.out
+
+# IDE/System files
+.vs/
+.vscode/
+.idea/
+.DS_Store
+
+# Data snapshots
+mini_redis_snapshot.csv
+*.csv
