@@ -32,17 +32,18 @@ int main() {
     // Try to reload state from a previous session.
     cache.loadSnapshot();
 
-    std::cout << "\n=== Mini Redis ===\n"
+    std::cout << "\n=== Redite ===\n"
               << "Capacity: " << CAPACITY << " entries, LRU eviction\n"
               << "Commands:\n"
               << "  SET key value [ttl]   — store a key (ttl in seconds, optional)\n"
+              << "                          use quotes for multi-word values: SET k \"hello world\"\n"
               << "  GET key               — retrieve a key\n"
               << "  DEL key               — delete a key\n"
               << "  EXIT                  — save snapshot and quit\n\n";
 
     std::string line;
     while (true) {
-        std::cout << "mini-redis> ";
+        std::cout << "redite> ";
         if (!std::getline(std::cin, line)) {
             break;  // EOF (e.g. Ctrl+D / Ctrl+Z).
         }
@@ -55,17 +56,61 @@ int main() {
         }
 
         // --- SET key value [ttl] ------------------------------------------
+        // Bug 3 fix: values can be double-quoted to allow spaces, e.g.:
+        //   SET greeting "hello world" 10
+        // Unquoted values are still single-token. Trailing garbage after
+        // the value (or after the TTL) now produces a warning.
         if (command == "SET" || command == "set") {
-            std::string key, value;
-            if (!(iss >> key >> value)) {
+            std::string key;
+            if (!(iss >> key)) {
                 std::cout << "  Usage: SET key value [ttl]\n";
                 continue;
+            }
+
+            // Skip whitespace, then check if value is quoted.
+            std::string value;
+            char ch;
+            iss >> std::ws;  // Eat leading whitespace.
+            if (!iss.get(ch)) {
+                std::cout << "  Usage: SET key value [ttl]\n";
+                continue;
+            }
+
+            if (ch == '"') {
+                // Read until the closing quote.
+                if (!std::getline(iss, value, '"')) {
+                    std::cout << "  Error: unterminated quote.\n";
+                    continue;
+                }
+            } else {
+                // Unquoted: put the char back, read one token.
+                iss.putback(ch);
+                if (!(iss >> value)) {
+                    std::cout << "  Usage: SET key value [ttl]\n";
+                    continue;
+                }
             }
 
             std::optional<int> ttl = std::nullopt;
             int ttlRaw;
             if (iss >> ttlRaw) {
                 ttl = ttlRaw;
+            } else {
+                // Clear fail state so we can check for leftover tokens.
+                // If iss >> ttlRaw failed, whatever was there wasn't an int.
+                iss.clear();
+            }
+
+            // Warn if there's leftover text after value/TTL.
+            std::string leftover;
+            if (iss >> leftover) {
+                std::cout << "  Warning: ignored trailing input: \""
+                          << leftover;
+                std::string rest;
+                if (std::getline(iss, rest)) {
+                    std::cout << rest;
+                }
+                std::cout << "\"\n";
             }
 
             cache.put(key, value, ttl);

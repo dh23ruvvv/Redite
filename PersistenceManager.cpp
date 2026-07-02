@@ -134,12 +134,22 @@ std::vector<CacheEntry> PersistenceManager::loadSnapshot() const {
             continue;
         }
 
+        // Bug 2 fix: wrap TTL parsing in try/catch so a hand-edited or
+        // corrupted TTL field doesn't crash the whole program on startup.
+        long long ttl;
+        try {
+            ttl = std::stoll(fields[2]);
+        } catch (const std::exception& e) {
+            std::cerr << "[PersistenceManager] Skipping line with bad TTL \""
+                      << fields[2] << "\": " << e.what() << "\n";
+            continue;
+        }
+
         CacheEntry entry;
         entry.key   = unescape(fields[0]);
         entry.value = unescape(fields[1]);
         entry.insertedAt = now;
 
-        long long ttl = std::stoll(fields[2]);
         if (ttl > 0) {
             entry.expiresAt = now + std::chrono::seconds(ttl);
         }

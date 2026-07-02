@@ -2,13 +2,20 @@
 
 #include <chrono>
 #include <iostream>
+#include <stdexcept>
 
 Cache::Cache(size_t capacity,
              std::unique_ptr<EvictionPolicy> policy,
              std::unique_ptr<PersistenceManager> persistence)
     : capacity_(capacity),
       policy_(std::move(policy)),
-      persistence_(std::move(persistence)) {}
+      persistence_(std::move(persistence)) {
+    // Bug 4 fix: capacity must be at least 1, otherwise evictionCandidate()
+    // would be called on an empty policy (undefined behavior on std::list).
+    if (capacity_ == 0) {
+        throw std::invalid_argument("Cache capacity must be at least 1");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // get — look up a key.
@@ -102,23 +109,32 @@ void Cache::saveSnapshot() const {
     persistence_->snapshot(store_);
 }
 
+// ---------------------------------------------------------------------------
+// loadSnapshot — restore cache state from disk.
+//
+// Bug 1 fix: we insert entries directly into the store with the expiresAt
+// that PersistenceManager already computed, instead of re-deriving a TTL
+// integer (which would truncate sub-second remainders a second time,
+// silently eroding TTLs by up to 2 seconds per save/load cycle).
+// ---------------------------------------------------------------------------
 void Cache::loadSnapshot() {
     auto entries = persistence_->loadSnapshot();
     for (auto& entry : entries) {
-        // Re-insert via the normal path so the eviction policy is kept in sync.
-        // If the snapshot has more entries than capacity, the oldest-loaded
-        // ones will be evicted, which is acceptable.
-        std::optional<int> ttl = std::nullopt;
-        if (entry.expiresAt.has_value()) {
-            auto remaining = std::chrono::duration_cast<std::chrono::seconds>(
-                entry.expiresAt.value() - std::chrono::steady_clock::now());
-            if (remaining.count() > 0) {
-                ttl = static_cast<int>(remaining.count());
-            } else {
-                continue;  // Already expired — skip.
-            }
+        // Skip entries that have already expired between load and now.
+        if (entry.expiresAt.has_value() && entry.isExpired()) {
+            continue;
         }
-        put(entry.key, entry.value, ttl);
+
+        // If at capacity, evict the least-recently-used loaded entry.
+        if (store_.size() >= capacity_) {
+            std::string victim = policy_->evictionCandidate();
+            removeInternal(victim);
+        }
+
+        // Insert directly into the store, preserving the exact expiresAt
+        // time_point that PersistenceManager computed — no second truncation.
+        store_[entry.key] = std::move(entry);
+        policy_->recordInsert(store_.find(entry.key)->second.key);
     }
 }
 
